@@ -1,4 +1,3 @@
-
 """
 ================================================================================
  File   : src/train.py
@@ -24,6 +23,7 @@ import logging
 import numpy as np
 import pandas as pd
 import yaml
+from tqdm.auto import tqdm
 
 from src.environment import build_env
 from src.agents import build_agent
@@ -109,7 +109,14 @@ def train_agent(atype: str, cfg: dict, checkpoint_dir: str, log_dir: str):
 
     checkpoint_path = os.path.join(checkpoint_dir, f"{atype}_best.pt")
 
-    for ep in range(1, episodes + 1):
+    pbar = tqdm(
+        range(1, episodes + 1),
+        desc=f"{atype.upper():<6}",
+        unit="ep",
+        dynamic_ncols=True,
+    )
+
+    for ep in pbar:
         total_reward, final_value, losses = run_episode(agent, env, atype, explore=True)
 
         history.append({
@@ -118,7 +125,8 @@ def train_agent(atype: str, cfg: dict, checkpoint_dir: str, log_dir: str):
             "final_value"  : final_value,
         })
 
-        if final_value > best_value:
+        is_best = final_value > best_value
+        if is_best:
             best_value = final_value
             agent.save(checkpoint_path)
             log.info("[%s] ep=%03d | reward=%.4f | value=%.2f | NEW BEST -> saved",
@@ -126,6 +134,15 @@ def train_agent(atype: str, cfg: dict, checkpoint_dir: str, log_dir: str):
         else:
             log.info("[%s] ep=%03d | reward=%.4f | value=%.2f",
                      atype.upper(), ep, total_reward, final_value)
+
+        pbar.set_postfix({
+            "reward": f"{total_reward:.2f}",
+            "value": f"{final_value:.2f}",
+            "best": f"{best_value:.2f}",
+            "saved": "✓" if is_best else "",
+        })
+
+    pbar.close()
 
     log_path = os.path.join(log_dir, f"{atype}_train_log.csv")
     pd.DataFrame(history).to_csv(log_path, index=False)
@@ -147,7 +164,7 @@ def main(cfg: dict = None):
     os.makedirs(log_dir, exist_ok=True)
 
     summary = []
-    for atype in AGENT_TYPES:
+    for atype in tqdm(AGENT_TYPES, desc="ALL AGENTS", unit="agent"):
         result = train_agent(atype, cfg, checkpoint_dir, log_dir)
         summary.append(result)
 
