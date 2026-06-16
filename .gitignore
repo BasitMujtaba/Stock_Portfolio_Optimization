@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+*.pt
+*.pth
+.env
+data/processed/
+results/checkpoints/
+results/figures/
+results/tables/
+notebooks/.ipynb_checkpoints/
+*.log
