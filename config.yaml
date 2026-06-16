@@ -1,0 +1,75 @@
+data:
+  start_date: "2010-01-01"
+  end_date: "2026-01-30"
+  train_start: "2010-01-01"
+  train_end: "2024-12-31"
+  test_start: "2025-01-01"
+  test_end: "2026-01-30"
+  n_stocks: 30
+  tickers:
+    - AVN
+    - BAFL
+    - DGKC
+    - EFERT
+    - ENGRO
+    - FATIMA
+    - FEROZ
+    - FFC
+    - GATM
+    - HBL
+    - HUBC
+    - INDU
+    - KAPCO
+    - LUCK
+    - MARI
+    - MCB
+    - MLCF
+    - NBP
+    - NCL
+    - NML
+    - OGDC
+    - PIOC
+    - POL
+    - PPL
+    - PSMC
+    - PSO
+    - SEARL
+    - SYS
+    - TRG
+    - UBL
+  raw_prices_dir: data/raw/prices
+  raw_news_dir: data/raw/news
+  processed_dir: data/processed/prices
+  processed_news_dir: data/processed/news
+  features_path: data/processed/features.parquet
+
+encoder:
+  window: 20
+  lstm_hidden: 128
+  transformer_dim: 64
+  n_heads: 4
+  n_layers: 2
+
+environment:
+  initial_cash: 1000000
+  lambda_mdd: 0.1
+  mu_turbulence: 0.05
+
+training:
+  episodes: 100
+  batch_size: 64
+  lr_actor: 0.0001
+  lr_critic: 0.001
+  gamma: 0.99
+  seed: 42
+
+agents:
+  ddpg:
+    tau: 0.005
+    noise: 0.1
+  ppo:
+    clip_epsilon: 0.2
+    epochs: 10
+  a2c:
+    entropy_coef: 0.01
+    value_coef: 0.5
