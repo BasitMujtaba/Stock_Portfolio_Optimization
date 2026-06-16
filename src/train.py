@@ -2,7 +2,7 @@
 ================================================================================
  File   : src/train.py
  Project: Stock Portfolio Optimization — PSX DRL Temporal Encoding
- Purpose: Trains DDPG, PPO, and A2C agents sequentially on the PSX portfolio
+ Purpose: Trains PPO and A2C agents sequentially on the PSX portfolio
           environment using the shared temporal encoder. Saves only the best
           checkpoint per agent (highest episode-end portfolio value) and logs
           per-episode training history to results/tables/.
@@ -33,8 +33,9 @@ log = logging.getLogger(__name__)
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-AGENT_TYPES   = ["ddpg", "ppo", "a2c"]
+AGENT_TYPES   = ["ppo", "a2c"]
 ENCODER_MODE  = "hybrid"
+EPISODES_OVERRIDE = 20   # force 20 episodes regardless of config.yaml
 
 
 # ── Config ─────────────────────────────────────────────────────────────────────
@@ -57,7 +58,6 @@ def run_episode(agent, env, atype: str, explore: bool = True):
     """
     Runs one full episode on the given env with the given agent.
     Handles the differing update() signatures:
-      - ddpg : off-policy, agent.update() called every step
       - ppo/a2c : on-policy, agent.update(last_obs, last_done) called once
                   at episode end (rollout accumulates across the episode)
 
@@ -77,11 +77,6 @@ def run_episode(agent, env, atype: str, explore: bool = True):
         agent.store(obs, action, reward, next_obs, done)
         total_reward += reward
         final_value   = info["portfolio_value"]
-
-        if atype == "ddpg":
-            losses = agent.update()
-            if losses is not None:
-                last_losses = losses
 
         obs = next_obs
 
@@ -103,7 +98,7 @@ def train_agent(atype: str, cfg: dict, checkpoint_dir: str, log_dir: str):
     env   = build_env(cfg, split="train")
     agent = build_agent(atype, cfg, encoder_mode=ENCODER_MODE)
 
-    episodes      = cfg["training"]["episodes"]
+    episodes      = EPISODES_OVERRIDE
     best_value    = -np.inf
     history       = []
 
