@@ -9,6 +9,14 @@
  Output : data/processed/prices/psx_prices_processed.csv
 
  Cache  : If processed CSV already exists -> return it directly, skip everything
+
+ Fixes  : [v2]
+          - drop_warmup: replaced groupby+apply+iloc with cumcount() filter
+            to prevent pandas 2.x silently dropping the 'ticker' column
+          - align_to_calendar: explicit reset_index() guard after reindex
+          - load_raw: defensive ticker column rename for alternate column names
+          - _cache_valid: validates 'ticker' and 'date' columns exist before use
+          - All groupby operations use observed=True (pandas 2.x FutureWarning fix)
 ================================================================================
 """
 
@@ -23,8 +31,11 @@ log = logging.getLogger(__name__)
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-_EMA_PERIODS  = [9, 21, 50, 200]
-_WARMUP_ROWS  = 252
+_EMA_PERIODS = [9, 21, 50, 200]
+_WARMUP_ROWS = 252
+
+# ── Required columns after full pipeline ─────────────────────────────────────
+_REQUIRED_COLS = ["date", "ticker", "open", "high", "low", "close", "volume"]
 
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -41,6 +52,18 @@ def _resolve(cfg_path):
     return os.path.join(PROJECT_ROOT, cfg_path)
 
 
+# ── Column guard ──────────────────────────────────────────────────────────────
+
+def _assert_cols(df, cols, stage):
+    """Raise immediately if any required column is missing — fail fast, fail loud."""
+    missing = [c for c in cols if c not in df.columns]
+    if missing:
+        raise KeyError(
+            "[" + stage + "] Missing columns: " + str(missing) + "\n"
+            "  Present columns: " + str(list(df.columns))
+        )
+
+
 # ── Cache check ───────────────────────────────────────────────────────────────
 
 def _cache_valid(path):
@@ -49,6 +72,10 @@ def _cache_valid(path):
     try:
         df = pd.read_csv(path, parse_dates=["date"])
         if df.empty:
+            return False, None
+        missing = [c for c in _REQUIRED_COLS if c not in df.columns]
+        if missing:
+            log.warning("Cache missing columns %s — rebuilding.", missing)
             return False, None
         log.info("Cache hit: %s  (%d rows, %d tickers, %s -> %s)",
                  os.path.basename(path), len(df), df["ticker"].nunique(),
@@ -65,34 +92,32 @@ def load_raw(raw_path, train_start, test_end):
     log.info("Loading raw prices: %s", raw_path)
     df = pd.read_csv(raw_path, parse_dates=["date"])
 
-    # drop derived / leaky columns — we recompute from scratch
+    df = df.rename(columns={
+        "symbol": "ticker", "Symbol": "ticker", "SYMBOL": "ticker",
+        "TICKER": "ticker", "Ticker": "ticker",
+        "stock":  "ticker", "Stock":  "ticker",
+    }, errors="ignore")
+
     df = df.drop(columns=["change", "change_pct"], errors="ignore")
+    df = df.rename(columns={"ldcp": "prev_close"}, errors="ignore")
 
-    # rename ldcp -> prev_close
-    df = df.rename(columns={"ldcp": "prev_close"})
+    _assert_cols(df, ["date", "ticker", "open", "high", "low", "close", "volume"], stage="load_raw")
 
-    # filter date window
     df = df[(df["date"] >= train_start) & (df["date"] <= test_end)].copy()
-
-    # drop rows missing core OHLCV
     df = df.dropna(subset=["open", "high", "low", "close", "volume"])
-
-    # sort
     df = df.sort_values(["ticker", "date"]).reset_index(drop=True)
 
     log.info("Raw loaded: %d rows | %d tickers | %s -> %s",
              len(df), df["ticker"].nunique(),
              df["date"].min().date(), df["date"].max().date())
+
+    _assert_cols(df, _REQUIRED_COLS, stage="load_raw[post]")
     return df
 
 
 # ── PSX calendar alignment ────────────────────────────────────────────────────
 
 def align_to_calendar(df, n_stocks):
-    """
-    Build a complete (date x ticker) grid from observed trading days.
-    Missing rows forward-filled (price unchanged); volume set to 0.
-    """
     calendar = pd.DatetimeIndex(sorted(df["date"].unique()))
     tickers  = sorted(df["ticker"].unique())
 
@@ -107,12 +132,13 @@ def align_to_calendar(df, n_stocks):
 
     price_cols = ["prev_close", "open", "high", "low", "close"]
     df[price_cols] = (df[price_cols]
-                      .groupby(level="ticker")
+                      .groupby(level="ticker", observed=True)
                       .transform(lambda s: s.ffill()))
     df["volume"] = df["volume"].fillna(0.0)
     df = df.dropna(subset=["close"])
     df = df.reset_index()
 
+    _assert_cols(df, _REQUIRED_COLS, stage="align_to_calendar")
     log.info("After alignment: %d rows", len(df))
     return df
 
@@ -132,28 +158,24 @@ def add_indicators(df):
     df = df.sort_values(["ticker", "date"]).reset_index(drop=True)
     frames = []
 
-    for ticker, grp in df.groupby("ticker"):
+    for ticker, grp in df.groupby("ticker", observed=True):
         g     = grp.copy().sort_values("date").reset_index(drop=True)
         close = g["close"]
         high  = g["high"]
         low   = g["low"]
 
-        # MACD
         g["macd"] = (close.ewm(span=12, adjust=False).mean()
                      - close.ewm(span=26, adjust=False).mean())
 
-        # RSI
         delta = close.diff()
         gain  = delta.clip(lower=0).rolling(14).mean()
         loss  = (-delta.clip(upper=0)).rolling(14).mean().replace(0, np.nan)
         g["rsi"] = 100 - (100 / (1 + gain / loss))
 
-        # CCI
         tp  = (high + low + close) / 3
         mad = tp.rolling(20).apply(lambda x: np.mean(np.abs(x - x.mean())), raw=True)
         g["cci"] = (tp - tp.rolling(20).mean()) / (0.015 * mad.replace(0, np.nan))
 
-        # DMI / DX
         prev_close = close.shift(1)
         up_move    = high - high.shift(1)
         dn_move    = low.shift(1) - low
@@ -170,11 +192,9 @@ def add_indicators(df):
         g["dmi_dx"] = (100 * (pdi14 - ndi14).abs()
                        / (pdi14 + ndi14).replace(0, np.nan))
 
-        # EMAs
         for p in _EMA_PERIODS:
-            g[f"ema_{p}"] = close.ewm(span=p, adjust=False).mean()
+            g["ema_" + str(p)] = close.ewm(span=p, adjust=False).mean()
 
-        # Bollinger Bands
         bb_sma        = close.rolling(20).mean()
         bb_std        = close.rolling(20).std(ddof=0)
         g["bb_mid"]   = bb_sma
@@ -184,7 +204,6 @@ def add_indicators(df):
         g["bb_width"] = bb_range / g["bb_mid"].replace(0, np.nan)
         g["bb_pct"]   = (close - g["bb_lower"]) / bb_range
 
-        # Turbulence
         g["turbulence"] = (close.pct_change()
                                .rolling(252)
                                .apply(_turbulence_1d, raw=True)
@@ -193,6 +212,8 @@ def add_indicators(df):
 
     result = pd.concat(frames, ignore_index=True)
     result = result.sort_values(["date", "ticker"]).reset_index(drop=True)
+
+    _assert_cols(result, _REQUIRED_COLS, stage="add_indicators")
     return result
 
 
@@ -200,10 +221,12 @@ def add_indicators(df):
 
 def drop_warmup(df):
     before = len(df)
-    df = (df.groupby("ticker", group_keys=False)
-            .apply(lambda x: x.iloc[_WARMUP_ROWS:])
-            .reset_index(drop=True))
-    df = df.dropna().reset_index(drop=True)
+    df = df.sort_values(["ticker", "date"]).reset_index(drop=True)
+    mask = df.groupby("ticker", observed=True).cumcount() >= _WARMUP_ROWS
+    df   = df[mask].reset_index(drop=True)
+    df   = df.dropna().reset_index(drop=True)
+
+    _assert_cols(df, _REQUIRED_COLS, stage="drop_warmup")
     log.info("Warmup drop: %d -> %d rows", before, len(df))
     return df
 
@@ -222,16 +245,18 @@ def run(cfg=None):
 
     os.makedirs(os.path.dirname(processed_path), exist_ok=True)
 
-    # cache check
     valid, cached = _cache_valid(processed_path)
     if valid:
         return cached
 
-    # load -> align -> indicators -> warmup drop
     df = load_raw(raw_path, train_start, test_end)
     df = align_to_calendar(df, n_stocks)
     df = add_indicators(df)
     df = drop_warmup(df)
+
+    _assert_cols(df, _REQUIRED_COLS, stage="run[pre-save]")
+    log.info("Final shape: %d rows | %d tickers | cols: %s",
+             len(df), df["ticker"].nunique(), list(df.columns))
 
     df.to_csv(processed_path, index=False)
     log.info("Saved -> %s  (%d rows, %.1f MB)",
