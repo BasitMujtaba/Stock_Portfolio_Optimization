@@ -1,0 +1,14 @@
+torch
+numpy
+pandas
+pandas-ta
+transformers
+gymnasium
+scikit-learn
+pyarrow
+pyyaml
+matplotlib
+seaborn
+tqdm
+aiohttp
+httpx
